@@ -26,7 +26,7 @@ use App\Http\Controllers\Api\Petugas\DashboardController as PetugasDashboard;
 use App\Http\Controllers\Api\Admin\LogAktivitasController;
 use App\Http\Controllers\Api\StaffController;
 use App\Http\Controllers\Api\Petugas\PengembalianController as PetugasPengembalian;
-
+use App\Http\Controllers\Api\ResetPasswordController;
 // ==========================================
 // 🌍 1. PUBLIC ROUTES (Tanpa Autentikasi)
 // ==========================================
@@ -38,6 +38,11 @@ Route::get('/kategori-alat', [KategoriAlatController::class, 'index']);
 Route::get('/satuan-alat', [SatuanAlatController::class, 'index']);
 Route::get('/alat/kondisi-options', [AlatController::class, 'getKondisiOptions']);
 
+
+Route::post('/lupa-sandi', [AuthController::class, 'forgotPassword']);
+Route::get('/reset-sandi/{token}', fn($token) => response()->json(['message' => 'Silakan reset melalui frontend.']))->name('password.reset');
+// 2. Route POST: Ini yang ditembak sama Next.js buat simpan sandi baru
+Route::post('/reset-sandi', [ResetPasswordController::class, 'resetPasswordStore']);
 // Aktivasi Akun
 Route::post('/cek-identitas', [AktivasiController::class, 'cekIdentitas']);
 Route::post('/proses-aktivasi', [AktivasiController::class, 'aktivasi']);

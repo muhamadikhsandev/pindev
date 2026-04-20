@@ -19,8 +19,7 @@ Route::get('/', function () {
 Route::post('/login', [AuthController::class, 'login'])->name('login');
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login/google', [AuthController::class, 'googleLogin']);
-Route::post('/lupa-sandi', [AuthController::class, 'forgotPassword']);
-Route::get('/reset-sandi/{token}', fn($token) => response()->json(['message' => 'Silakan reset melalui frontend.']))->name('password.reset');
+
 
 // ==========================================
 // 📧 VERIFIKASI EMAIL

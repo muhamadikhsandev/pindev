@@ -19,7 +19,7 @@ use Carbon\Carbon;
 use App\Exports\PeminjamanExport;
 use Maatwebsite\Excel\Facades\Excel;
 use Barryvdh\DomPDF\Facade\Pdf;
-
+use Illuminate\Support\Facades\Log;
 
 class PeminjamanController extends Controller
 {
@@ -33,12 +33,11 @@ class PeminjamanController extends Controller
     }
 
 
-public function export(Request $request)
+    public function export(Request $request)
     {
         try {
             $type = $request->query('type', 'pdf');
             
-            // FIX: Perbaiki relasi eager loading menjadi 'detail_peminjaman'
             $data = Peminjaman::with(['peminjam', 'detail_peminjaman.alat', 'detail_peminjaman.unit.alat'])->latest()->get();
 
             if ($type === 'excel') {
@@ -52,17 +51,18 @@ public function export(Request $request)
             return $pdf->download('Laporan_Peminjaman_' . date('Ymd_His') . '.pdf');
             
         } catch (\Exception $e) {
-            // Tulis ke log agar kalau error lagi kita tau persis penyebabnya
-            \Illuminate\Support\Facades\Log::error('Export Peminjaman Error: ' . $e->getMessage());
+            Log::error('Export Peminjaman Error: ' . $e->getMessage());
             
             return response()->json(['message' => 'Gagal Export: ' . $e->getMessage()], 500);
         }
     }
+
     public function index()
     {
         try {
+            // FIX: Hapus 'Bermasalah' dari urutan field
             $data = Peminjaman::with(['peminjam', 'detail_peminjaman.alat.kategori', 'detail_peminjaman.unit'])
-                ->orderByRaw("FIELD(status, 'Menunggu Petugas', 'Menunggu Admin', 'Disetujui', 'Dipinjam', 'Menunggu Pengecekan', 'Bermasalah', 'Dikembalikan', 'Ditolak')")
+                ->orderByRaw("FIELD(status, 'Menunggu Petugas', 'Menunggu Admin', 'Disetujui', 'Dipinjam', 'Menunggu Pengecekan', 'Dikembalikan', 'Ditolak')")
                 ->orderBy('created_at', 'desc')
                 ->get();
 
@@ -92,7 +92,6 @@ public function export(Request $request)
             /** @var \App\Models\User $user */
             $user = Auth::user();
             
-            // FIX Intelephense P1013: Sekarang editor tahu $user adalah instance App\Models\User
             $user->load('jurusan');
             $jurusanName = $user->jurusan ? $user->jurusan->nama_jurusan : '-';
 
@@ -106,7 +105,6 @@ public function export(Request $request)
             ]);
 
             foreach ($request->items as $item) {
-                // LOGIKA AUTO-ASSIGN UNIT FISIK
                 $qtyDiminta = $item['qty'];
                 
                 $availableUnits = AlatUnit::where('alat_id', $item['id'])
@@ -131,12 +129,10 @@ public function export(Request $request)
                         'jumlah'        => 1            
                     ]);
 
-                    // Kunci unit ini jadi "DIPINJAM" agar tidak bentrok dengan transaksi lain
                     $unit->update(['status' => AlatUnit::STATUS_DIPINJAM]);
                 }
             }
 
-            // Bersihkan isi keranjang dari tabel cart_items
             DB::table('cart_items')->where('user_id', $user->id)->delete();
 
             DB::commit();
@@ -151,8 +147,10 @@ public function export(Request $request)
     public function updateStatus(Request $request, $id)
     {
         $validator = Validator::make($request->all(), [
-            'status' => 'required|in:Menunggu Petugas,Menunggu Admin,Disetujui,Dipinjam,Menunggu Pengecekan,Bermasalah,Dikembalikan,Ditolak',
-            'catatan'=> 'nullable|string|max:1000', 
+            // FIX: Hapus 'Bermasalah', tambahkan kondisi_kembali
+            'status' => 'required|in:Menunggu Petugas,Menunggu Admin,Disetujui,Dipinjam,Menunggu Pengecekan,Dikembalikan,Ditolak',
+            'kondisi_kembali'   => 'nullable|in:Baik,Bermasalah',
+            'catatan'           => 'nullable|string|max:1000', 
             'kategori_denda_id' => 'nullable|exists:kategori_denda,id',
             'alat_id'           => 'nullable|exists:alat,id',
         ]);
@@ -164,6 +162,10 @@ public function export(Request $request)
         DB::beginTransaction();
         try {
             $peminjaman = Peminjaman::with('detail_peminjaman.unit')->findOrFail($id);
+            
+            // Simpan snapshot data sebelum diubah untuk log
+            $dataLama = $peminjaman->toArray();
+
             $newStatus = $request->status;
             $updateData = ['status' => $newStatus];
 
@@ -171,12 +173,11 @@ public function export(Request $request)
                 $updateData['catatan'] = $request->catatan;
             }
 
-            if (in_array($newStatus, ['Disetujui', 'Ditolak'])) {
+            if (in_array($newStatus, ['Disetujui', 'Ditolak', 'Dikembalikan'])) {
                 $updateData['petugas_id'] = Auth::id();
             }
 
-            // 1. JIKA DITOLAK
-            // Bebaskan kembali unit fisik yang tadi dikunci saat awal checkout
+            // --- 1. LOGIKA STATUS: DITOLAK ---
             if ($newStatus == 'Ditolak' && in_array($peminjaman->status, ['Menunggu Petugas', 'Menunggu Admin', 'Disetujui'])) {
                  foreach ($peminjaman->detail_peminjaman as $detail) {
                      if($detail->unit) {
@@ -184,34 +185,23 @@ public function export(Request $request)
                      }
                  }
             } 
-            // 2. JIKA DIKEMBALIKAN (AMAN)
+            
+            // --- 2. LOGIKA STATUS: DIKEMBALIKAN (PUSAT PENGECEKAN FINAL) ---
             elseif ($newStatus == 'Dikembalikan' && $peminjaman->status != 'Dikembalikan') {
-                $pengembalian = Pengembalian::where('peminjaman_id', $peminjaman->id)->latest()->first();
-                if ($pengembalian) {
-                    $pengembalian->update([
-                        'kondisi_kembali' => Pengembalian::KONDISI_BAIK,
-                        'catatan' => 'Pengecekan selesai, aman.'
-                    ]);
-                }
-                // Bebaskan kembali unit fisik agar bisa dipinjam siswa lain
-                foreach ($peminjaman->detail_peminjaman as $detail) {
-                    if($detail->unit) {
-                        $detail->unit->update(['status' => AlatUnit::STATUS_TERSEDIA]);
-                    }
-                }
-            } 
-            // 3. JIKA MENUNGGU PENGECEKAN (CEK TELAT/DENDA TELAT)
-            elseif ($newStatus == 'Menunggu Pengecekan') {
                 $tgl_sekarang = Carbon::now();
+                $kondisi = $request->kondisi_kembali ?? Pengembalian::KONDISI_BAIK;
+                
+                // A. Buat/Update Data Pengembalian
                 $pengembalian = Pengembalian::updateOrCreate(
                     ['peminjaman_id' => $peminjaman->id],
                     [
                         'tanggal_kembali' => $tgl_sekarang->toDateString(),
-                        'kondisi_kembali' => Pengembalian::KONDISI_BELUM_DICEK,
-                        'catatan' => 'Barang diterima, menunggu pengecekan',
+                        'kondisi_kembali' => $kondisi,
+                        'catatan'         => $request->catatan ?? 'Pengecekan selesai.'
                     ]
                 );
 
+                // B. Cek Denda Keterlambatan (TELAT)
                 $tgl_kembali_input = Carbon::parse($pengembalian->tanggal_kembali)->startOfDay();
                 $tgl_rencana_murni = Carbon::parse($peminjaman->tanggal_rencana_kembali)->startOfDay();
                 
@@ -223,15 +213,10 @@ public function export(Request $request)
                         $total_denda_telat = $kategoriTelat->nilai_denda * $hari_telat;
                         $jumlah_denda_final = min($total_denda_telat, 30000); 
 
-                        $idAlatPertama = $peminjaman->detail_peminjaman->first()->alat_id;
-
                         Denda::updateOrCreate(
+                            ['pengembalian_id' => $pengembalian->id, 'kategori_denda_id' => $kategoriTelat->id],
                             [
-                                'pengembalian_id' => $pengembalian->id,
-                                'kategori_denda_id' => $kategoriTelat->id
-                            ],
-                            [
-                                'alat_id' => $idAlatPertama, 
+                                'alat_id' => $peminjaman->detail_peminjaman->first()->alat_id ?? null, 
                                 'jumlah_denda' => $jumlah_denda_final,
                                 'status' => 'belum_bayar',
                                 'keterangan' => "Terlambat {$hari_telat} hari (Rp " . number_format($kategoriTelat->nilai_denda) . "/hari)",
@@ -239,22 +224,10 @@ public function export(Request $request)
                         );
                     }
                 }
-            } 
-            // 4. JIKA BERMASALAH (DENDA RUSAK/HILANG)
-            elseif ($newStatus == 'Bermasalah') {
-                $pengembalian = Pengembalian::where('peminjaman_id', $peminjaman->id)->latest()->first();
-                if (!$pengembalian) {
-                    DB::rollBack();
-                    return response()->json(['status' => 'error', 'message' => 'Data pengembalian tidak ditemukan.'], 422);
-                }
 
-                $pengembalian->update([
-                    'kondisi_kembali' => Pengembalian::KONDISI_BERMASALAH,
-                    'catatan' => $request->catatan ?? 'Barang bermasalah'
-                ]);
-
-                if ($request->filled('kategori_denda_id')) {
-                    $finalAlatId = $request->filled('alat_id') ? $request->alat_id : $peminjaman->detail_peminjaman->first()->alat_id;
+                // C. Cek Denda Bermasalah (RUSAK/HILANG) dari input form petugas
+                if ($kondisi == Pengembalian::KONDISI_BERMASALAH && $request->filled('kategori_denda_id')) {
+                    $finalAlatId = $request->alat_id ?? $peminjaman->detail_peminjaman->first()->alat_id;
                     $kategori = KategoriDenda::find($request->kategori_denda_id);
                     
                     if ($kategori) {
@@ -263,10 +236,7 @@ public function export(Request $request)
                             : $kategori->nilai_denda;
 
                         Denda::updateOrCreate(
-                            [
-                                'pengembalian_id' => $pengembalian->id,
-                                'kategori_denda_id' => $request->kategori_denda_id,
-                            ],
+                            ['pengembalian_id' => $pengembalian->id, 'kategori_denda_id' => $request->kategori_denda_id],
                             [
                                 'alat_id' => $finalAlatId,
                                 'jumlah_denda' => $jumlah_denda,
@@ -276,16 +246,40 @@ public function export(Request $request)
                         );
                     }
                 }
+
+                // D. Bebaskan Unit Fisik kembali ke Rak (Tersedia)
+                foreach ($peminjaman->detail_peminjaman as $detail) {
+                    if($detail->unit) {
+                        $detail->unit->update(['status' => AlatUnit::STATUS_TERSEDIA]);
+                    }
+                }
+            } 
+            
+            // --- 3. LOGIKA STATUS: MENUNGGU PENGECEKAN ---
+            // Di sini TIDAK ADA pembuatan pengembalian lagi, cukup ubah status peminjaman agar flow UI sinkron
+            elseif ($newStatus == 'Menunggu Pengecekan') {
+                // Biarkan saja updateData['status'] = 'Menunggu Pengecekan' berjalan
             }
 
+            // Simpan perubahan status utama
             $peminjaman->update($updateData);
-            DB::commit();
 
-            return response()->json(['status' => 'success', 'message' => "Status berhasil diperbarui menjadi {$newStatus}"], 200);
+            // Catat Log Aktivitas (Audit Trail)
+            if (method_exists($peminjaman, 'createLog')) {
+                $peminjaman->createLog(
+                    'UPDATE_STATUS',
+                    "Mengubah status menjadi {$newStatus}",
+                    $dataLama,
+                    $peminjaman->fresh()->toArray()
+                );
+            }
+
+            DB::commit();
+            return response()->json(['status' => 'success', 'message' => "Status berhasil diperbarui menjadi {$newStatus}"]);
 
         } catch (\Exception $e) {
             DB::rollBack();
-            return response()->json(['status' => 'error', 'message' => 'Gagal: ' . $e->getMessage()], 500);
+            return response()->json(['status' => 'error', 'message' => 'Gagal memperbarui status: ' . $e->getMessage()], 500);
         }
     }
 
@@ -309,8 +303,6 @@ public function export(Request $request)
                 ], 422);
             }
 
-            // Di sistem baru, stok tidak dikurangi secara manual karena fisik unit
-            // sudah terkunci sebagai 'DIPINJAM' sejak awal checkout (store).
             $peminjaman->update([
                 'status' => 'Dipinjam',
                 'catatan' => $peminjaman->catatan . " | Barang diserahkan oleh petugas pada: " . now()->format('d-m-Y H:i'),

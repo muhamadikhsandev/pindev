@@ -10,7 +10,6 @@ use App\Traits\BulkActionTrait;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
-// Tambahkan import di bagian atas controller
 use App\Exports\PengembalianExport;
 use Maatwebsite\Excel\Facades\Excel;
 use Barryvdh\DomPDF\Facade\Pdf;
@@ -26,36 +25,42 @@ class PengembalianController extends Controller
         $this->model = $pengembalian;
     }
 
+    public function export(Request $request)
+    {
+        try {
+            $type = $request->query('type', 'pdf');
+            $data = Pengembalian::with(['peminjaman.peminjam'])->latest()->get();
 
+            if ($type === 'excel') {
+                return Excel::download(new PengembalianExport, 'Laporan_Pengembalian.xlsx');
+            }
 
-public function export(Request $request)
-{
-    try {
-        $type = $request->query('type', 'pdf');
-        $data = Pengembalian::with(['peminjaman.peminjam'])->latest()->get();
+            $pdf = Pdf::loadView('exports.pengembalian_pdf', ['data' => $data]);
+            $pdf->setPaper('a4', 'portrait');
 
-        if ($type === 'excel') {
-            return \Maatwebsite\Excel\Facades\Excel::download(new \App\Exports\PengembalianExport, 'Laporan_Pengembalian.xlsx');
+            return $pdf->download('Laporan_Pengembalian_' . date('Ymd') . '.pdf');
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal export: ' . $e->getMessage()
+            ], 500);
         }
-
-        // Generate PDF menggunakan DomPDF
-        $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadView('exports.pengembalian_pdf', ['data' => $data]);
-        
-        // Atur ukuran kertas
-        $pdf->setPaper('a4', 'portrait');
-
-        return $pdf->download('Laporan_Pengembalian_' . date('Ymd') . '.pdf');
-    } catch (\Exception $e) {
-        return response()->json(['message' => 'Gagal export: ' . $e->getMessage()], 500);
     }
-}
+
     /**
      * Menampilkan daftar pengembalian
      */
     public function index(Request $request)
     {
         try {
-            $query = Pengembalian::with(['peminjaman.peminjam']);
+            // 🚨 BIANG KEROK DIPERBAIKI DI SINI 🚨
+            // Sebelumnya cuma ['peminjaman.peminjam']
+            // Sekarang bawa semua relasi detail dan alatnya sekalian!
+            $query = Pengembalian::with([
+                'peminjaman.peminjam',
+                'peminjaman.detail_peminjaman.alat',
+                'peminjaman.detail_peminjaman.unit.alat'
+            ]);
 
             if ($request->search) {
                 $query->whereHas('peminjaman', function($q) use ($request) {
@@ -64,20 +69,91 @@ public function export(Request $request)
             }
 
             $data = $query->latest()->get();
-            return response()->json(['data' => $data], 200);
+            
+            return response()->json([
+                'success' => true,
+                'data' => $data
+            ], 200);
         } catch (\Exception $e) {
-            return response()->json(['message' => 'Gagal mengambil data: ' . $e->getMessage()], 500);
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal mengambil data: ' . $e->getMessage()
+            ], 500);
         }
     }
 
     /**
-     * Mengambil opsi peminjaman untuk dropdown
-     * FIX: Mengembalikan key 'data' agar sesuai dengan usePengembalian.ts
+     * METHOD BARU: Untuk melayani API endpoint /riwayat-pengembalian (Frontend RiwayatKembaliClient)
      */
+    public function riwayatPengembalianUser(Request $request)
+    {
+        try {
+            $user = $request->user();
+            
+            $query = Pengembalian::with([
+                'peminjaman.detail_peminjaman.unit.alat', 
+                'peminjaman.detail_peminjaman.alat',
+                'denda' // Eager load denda
+            ]);
+
+            if ($user && $user->role !== 'admin') {
+                $query->whereHas('peminjaman', function($q) use ($user) {
+                    $q->where('user_id', $user->id); 
+                });
+            }
+
+            $pengembalian = $query->latest()->get();
+
+            $formattedData = $pengembalian->map(function ($item) {
+                $namaAlatList = [];
+                $fotoPath = null;
+
+                if ($item->peminjaman && $item->peminjaman->detail_peminjaman) {
+                    foreach ($item->peminjaman->detail_peminjaman as $detail) {
+                        $alat = $detail->alat ?? ($detail->unit->alat ?? null);
+                        if ($alat) {
+                            $namaAlatList[] = $alat->nama_alat ?? ($alat->nama ?? 'Alat');
+                            if (!$fotoPath) {
+                                $fotoPath = $alat->foto_path ?? ($alat->gambar ?? null);
+                            }
+                        }
+                    }
+                }
+
+                return [
+                    'id' => $item->id,
+                    'nama_alat' => count($namaAlatList) > 0 ? implode(', ', array_unique($namaAlatList)) : 'Transaksi #' . ($item->peminjaman->kode_peminjaman ?? $item->peminjaman_id),
+                    'tanggal_kembali' => $item->tanggal_kembali,
+                    'kondisi' => $item->kondisi_kembali,
+                    'kondisi_kembali' => $item->kondisi_kembali,
+                    'catatan' => $item->catatan,
+                    // --- FIX DI SINI: Samakan dengan Model Denda ---
+                    'denda' => $item->denda ? [
+                        'jumlah_denda' => $item->denda->jumlah_denda, // PAKAI jumlah_denda, BUKAN nominal
+                        'keterangan' => $item->denda->keterangan,
+                        'status' => $item->denda->status
+                    ] : null,
+                    'foto_path' => $fotoPath,
+                ];
+            });
+
+            return response()->json([
+                'success' => true,
+                'data' => $formattedData,
+                'message' => 'Berhasil mengambil riwayat pengembalian'
+            ], 200);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false, 
+                'message' => 'Gagal: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
     public function getOptions()
     {
         try {
-            // Ambil peminjaman yang statusnya sedang dipinjam
             $options = Peminjaman::with('peminjam')
                 ->where('status', 'Dipinjam')
                 ->get()
@@ -89,9 +165,15 @@ public function export(Request $request)
                     ];
                 });
 
-            return response()->json(['data' => $options], 200);
+            return response()->json([
+                'success' => true,
+                'data' => $options
+            ], 200);
         } catch (\Exception $e) {
-            return response()->json(['message' => 'Gagal mengambil opsi: ' . $e->getMessage()], 500);
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal mengambil opsi: ' . $e->getMessage()
+            ], 500);
         }
     }
 
@@ -103,7 +185,9 @@ public function export(Request $request)
             'kondisi_kembali' => 'required|string',
         ]);
 
-        if ($v->fails()) return response()->json(['errors' => $v->errors()], 422);
+        if ($v->fails()) {
+            return response()->json(['success' => false, 'errors' => $v->errors()], 422);
+        }
 
         try {
             DB::beginTransaction();
@@ -130,10 +214,17 @@ public function export(Request $request)
             $peminjaman->update(['status' => 'Selesai']);
 
             DB::commit();
-            return response()->json(['message' => 'Berhasil', 'data' => $pengembalian], 201);
+            return response()->json([
+                'success' => true,
+                'message' => 'Berhasil', 
+                'data' => $pengembalian
+            ], 201);
         } catch (\Exception $e) {
             DB::rollBack();
-            return response()->json(['message' => $e->getMessage()], 500);
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage()
+            ], 500);
         }
     }
 }

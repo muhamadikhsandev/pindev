@@ -2,10 +2,12 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Storage;
 
-class Alat extends Model
+/**
+ * Extends BaseModel supaya otomatis dapet fitur Loggable & HasFactory
+ */
+class Alat extends BaseModel
 {
     protected $table = 'alat';
 
@@ -24,7 +26,7 @@ class Alat extends Model
         return $this->foto_path ? asset('storage/' . $this->foto_path) : null;
     }
 
-    // ================= EVENT BOOT (TOMBOL HAPUS AJAIB) =================
+    // ================= EVENT BOOT =================
     protected static function boot()
     {
         parent::boot();
@@ -34,7 +36,7 @@ class Alat extends Model
             // 1. Hapus semua fisik unit yang terkait dengan alat ini
             $alat->units()->delete();
             
-            // 2. Bersihkan file foto dari storage agar hardisk tidak penuh
+            // 2. Bersihkan file foto dari storage
             if ($alat->foto_path && Storage::disk('public')->exists($alat->foto_path)) {
                 Storage::disk('public')->delete($alat->foto_path);
             }
@@ -57,8 +59,5 @@ class Alat extends Model
         return $this->belongsTo(SatuanAlat::class, 'satuan_id');
     }
 
-    public function jadwal()
-    {
-        return $this->hasMany(JadwalPeminjaman::class, 'alat_id');
-    }
+   
 }

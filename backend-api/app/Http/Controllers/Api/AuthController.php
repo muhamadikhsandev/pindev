@@ -5,185 +5,219 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Auth\Events\Verified;
+use Illuminate\Support\Facades\Password;
 
 class AuthController extends Controller
 {
-
-
-public function googleLogin(Request $request)
-{
-    $request->validate([
-        'email' => 'required|email',
-    ]);
-
-    // Cari user berdasarkan email[cite: 5]
-    $user = User::where('email', $request->email)->first();
-
-    if (!$user) {
-        return response()->json([
-            'message' => 'Email ini belum terdaftar di sistem PINDEV. Silakan hubungi Admin.'
-        ], 404);
-    }
-
-    // Cek status user[cite: 5]
-    if ($user->status !== 'aktif') {
-        return response()->json([
-            'message' => 'Akun Anda tidak aktif atau ditangguhkan.'
-        ], 403);
-    }
-
-    // Buat token Sanctum untuk session API
-    $token = $user->createToken('auth_token')->plainTextToken;
-
-    return response()->json([
-        'message' => 'Berhasil login via Google',
-        'user' => $user,
-        'token' => $token,
-    ]);
-}
     /**
-     * REGISTER
-     * Menangani pendaftaran user baru (default role: peminjam)
+     * 🔐 LOGIN (Pindev Lab PPLG)
      */
-    public function register(Request $request)
+    public function login(Request $request)
     {
+        Log::info('--- LOGIN ATTEMPT START ---', ['email' => $request->email]);
+
         $validator = Validator::make($request->all(), [
-            'name'     => 'required|string|max:255',
-            'email'    => 'required|string|email|max:255|unique:users',
-            'nis'      => 'nullable|string|unique:users', 
-            'password' => 'required|string|min:8|confirmed',
-            // jurusan_id bisa ditambahkan di sini kalau ada di form register
+            'email'    => 'required|email',
+            'password' => 'required',
         ]);
 
         if ($validator->fails()) {
+            Log::warning('Login Validation Failed:', $validator->errors()->toArray());
             return response()->json([
-                'message' => 'Data tidak valid', 
+                'message' => 'Input tidak valid',
                 'errors'  => $validator->errors()
             ], 422);
         }
 
-        try {
-            $user = User::create([
-                'name'     => $request->name,
-                'email'    => $request->email,
-                'nis'      => $request->nis,
-                'password' => Hash::make($request->password),
-                'role'     => 'peminjam', // Default role
-                'status'   => 'aktif',    // Default status
-            ]);
+        // 1. Cek Kredensial
+        if (!Auth::attempt($request->only('email', 'password'))) {
+            Log::warning('Login Failed: Wrong Credentials', ['email' => $request->email]);
+            return response()->json([
+                'message' => 'Email atau kata sandi salah.'
+            ], 401);
+        }
 
-            // Kirim email verifikasi
-            $user->sendEmailVerificationNotification();
+        $user = Auth::user();
+        Log::info('Credentials Correct. Checking User Status...', [
+            'user_id' => $user->id,
+            'role'    => $user->role,
+            'status'  => $user->status
+        ]);
+
+        /**
+         * 2. 🛡️ FILTER KEAMANAN STATUS (LOGGED)
+         */
+        
+        // A. Cek Nonaktif
+        if ($user->isNonActive()) {
+            Log::error('Access Denied: Account Non-Active', ['user_id' => $user->id]);
+            Auth::logout();
+            return response()->json(['message' => 'Akun Anda dinonaktifkan. Hubungi Admin Lab PPLG.'], 403);
+        }
+
+        // B. Cek Resign (Spesifik per Role)
+        if ($user->isResign()) {
+            Log::error('Access Denied: Account Resigned', ['user_id' => $user->id, 'role' => $user->role]);
+            Auth::logout();
+            
+            $msg = match(true) {
+                $user->isAdmin(), $user->isPetugas() => 'Staf sudah tidak bertugas lagi di Lab.',
+                $user->isGuru() => 'Guru sudah tidak lagi mengajar/pindah tugas.',
+                $user->isSiswa() => 'Siswa sudah tidak terdaftar (Resign/Pindah Sekolah).',
+                default => 'Akun tidak aktif (Resign).'
+            };
+            return response()->json(['message' => $msg], 403);
+        }
+
+        // C. Cek Lulus (Khusus Siswa)
+        if ($user->isSiswa() && $user->isLulus()) {
+            Log::error('Access Denied: Student Graduated', ['user_id' => $user->id]);
+            Auth::logout();
+            return response()->json(['message' => 'Akses ditolak. Alumni tidak diizinkan meminjam device.'], 403);
+        }
+
+        // D. Cek Verifikasi Email (Khusus Peminjam)
+        if ($user->isPeminjam() && !$user->hasVerifiedEmail()) {
+            Log::warning('Access Denied: Email Not Verified', ['user_id' => $user->id]);
+            Auth::logout();
+            return response()->json(['message' => 'Email belum diverifikasi. Cek inbox Anda.'], 403);
+        }
+
+        /**
+         * 3. ✅ LOLOS FILTER - PROSES SESSION
+         */
+        try {
+            if ($request->hasSession()) {
+                $request->session()->regenerate();
+                Log::info('Session Regenerated Successfully', ['session_id' => $request->session()->getId()]);
+            } else {
+                Log::warning('Login Proceeding without Session Store (Check Middleware)');
+            }
+
+            Log::info('--- LOGIN SUCCESS ---', [
+                'user_id' => $user->id,
+                'target_dashboard' => ($user->isAdmin() || $user->isPetugas()) ? $user->role : 'peminjam'
+            ]);
 
             return response()->json([
-                'message' => 'Registrasi berhasil. Silakan cek email Anda untuk verifikasi.'
-            ], 201);
+                'message' => 'Selamat datang, ' . $user->name,
+                'user'    => $user
+            ], 200);
 
         } catch (\Exception $e) {
-            Log::error('Register Error:', ['error' => $e->getMessage()]);
-            return response()->json(['message' => 'Gagal mendaftar, terjadi kesalahan server.'], 500);
+            Log::critical('Final Login Error:', ['error' => $e->getMessage()]);
+            return response()->json(['message' => 'Terjadi kesalahan sistem saat login.'], 500);
         }
     }
 
     /**
-     * VERIFY EMAIL
-     */
-    public function verify(Request $request)
-    {
-        Log::info('--- DEBUG: REQUEST VERIFIKASI DITERIMA ---');
-
-        if (!$request->hasValidSignature()) {
-            Log::warning('DEBUG: Signature Invalid', ['url' => $request->fullUrl()]);
-            return response()->json(['message' => 'Link verifikasi tidak valid atau sudah kadaluarsa.'], 403);
-        }
-
-        try {
-            $user = User::findOrFail($request->route('id'));
-
-            if (!$user->hasVerifiedEmail()) {
-                $user->markEmailAsVerified();
-                event(new Verified($user));
-                Log::info('DEBUG: Verifikasi Berhasil', ['user_id' => $user->id]);
-            }
-
-            $token = $user->createToken('auth_token')->plainTextToken;
-
-            return response()->json([
-                'message' => 'Email berhasil diverifikasi!',
-                'token'   => $token,
-                'user'    => $user // 🔥 FIX: Kirim seluruh object user, password otomatis ke-hide oleh Model
-            ]);
-
-        } catch (\Exception $e) {
-            Log::error('DEBUG: Gagal Verifikasi', ['msg' => $e->getMessage()]);
-            return response()->json(['message' => 'Terjadi kesalahan server.'], 500);
-        }
-    }
-
-    /**
-     * LOGIN
-     */
-    public function login(Request $request)
-    {
-        Log::info('Login Attempt:', ['email' => $request->email]);
-
-        try {
-            $validator = Validator::make($request->all(), [
-                'email'    => 'required|email',
-                'password' => 'required',
-            ]);
-
-            if ($validator->fails()) {
-                return response()->json(['message' => 'Input tidak valid', 'errors' => $validator->errors()], 422);
-            }
-
-            $user = User::where('email', $request->email)->first();
-
-            // Cek Kredensial
-            if (!$user || !Hash::check($request->password, $user->password)) {
-                return response()->json(['message' => 'Email atau password salah'], 401);
-            }
-
-            // Cek Verifikasi Email (Opsional, matikan jika tidak perlu)
-            if (!$user->hasVerifiedEmail()) {
-                return response()->json(['message' => 'Email belum diverifikasi. Silakan cek inbox Anda.'], 403);
-            }
-
-            // Buat Token Sanctum
-            $token = $user->createToken('auth_token')->plainTextToken;
-
-            Log::info('Login Success:', ['user_id' => $user->id]);
-
-            return response()->json([
-                'message' => 'Login berhasil',
-                'token'   => $token,
-                'user'    => $user, // 🔥 FIX UTAMA: Tidak pakai only(). Semua field (role, status, nis, jurusan_id) otomatis terkirim!
-            ]);
-
-        } catch (\Exception $e) {
-            Log::error('Login Error:', ['msg' => $e->getMessage()]);
-            return response()->json(['message' => 'Terjadi kesalahan pada server'], 500);
-        }
-    }
-
-    /**
-     * ME (GET CURRENT USER)
-     */
-    public function me(Request $request) 
-    { 
-        return response()->json($request->user()); 
-    }
-
-    /**
-     * LOGOUT
+     * 🚪 LOGOUT (LOGGED)
      */
     public function logout(Request $request)
     {
-        $request->user()->currentAccessToken()->delete();
-        return response()->json(['message' => 'Berhasil logout']);
+        $user = Auth::user();
+        Log::info('User Logging Out...', ['user_id' => $user?->id]);
+
+        Auth::logout();
+
+        if ($request->hasSession()) {
+            $request->session()->invalidate();
+            $request->session()->regenerateToken();
+            Log::info('Session Invalidated and Token Regenerated');
+        }
+
+        return response()->json(['message' => 'Berhasil keluar dari sistem Pindev.']);
+    }
+
+    /**
+     * 👤 ME (Profile Data)
+     */
+    public function me(Request $request)
+    {
+        Log::info('Fetching User Profile (ME)', ['user_id' => $request->user()->id]);
+        return response()->json($request->user()->load(['jurusan', 'kelas']));
+    }
+
+    /**
+     * 📝 REGISTER (Siswa & Guru)
+     */
+    public function register(Request $request)
+    {
+        Log::info('Register Attempt:', ['email' => $request->email, 'role' => 'peminjam']);
+
+        $validator = Validator::make($request->all(), [
+            'name'            => 'required|string|max:255',
+            'email'           => 'required|string|email|max:255|unique:users',
+            'nomor_identitas' => 'required|string|unique:users',
+            'status_peminjam' => 'required|in:GURU,SISWA',
+            'password'        => 'required|string|min:8|confirmed',
+        ]);
+
+        if ($validator->fails()) {
+            Log::warning('Register Validation Failed:', $validator->errors()->toArray());
+            return response()->json(['message' => 'Data tidak valid', 'errors' => $validator->errors()], 422);
+        }
+
+        try {
+            $user = User::create([
+                'name'            => $request->name,
+                'email'           => $request->email,
+                'nomor_identitas' => $request->nomor_identitas,
+                'status_peminjam' => $request->status_peminjam,
+                'password'        => Hash::make($request->password),
+                'role'            => 'peminjam',
+                'status'          => 'aktif',
+            ]);
+
+            Log::info('User Created, Sending Verification Email', ['user_id' => $user->id]);
+            $user->sendEmailVerificationNotification();
+
+            return response()->json(['message' => 'Pendaftaran berhasil. Silakan cek email.'], 201);
+        } catch (\Exception $e) {
+            Log::error('Register Exception:', ['error' => $e->getMessage()]);
+            return response()->json(['message' => 'Gagal mendaftar.'], 500);
+        }
+    }
+
+    /**
+     * 📧 VERIFY EMAIL
+     */
+    public function verify(Request $request)
+    {
+        Log::info('Email Verification Attempt', ['id' => $request->route('id')]);
+
+        if (!$request->hasValidSignature()) {
+            Log::warning('Email Verification: Invalid Signature');
+            return response()->json(['message' => 'Link tidak valid.'], 403);
+        }
+
+        $user = User::findOrFail($request->route('id'));
+
+        if (!$user->hasVerifiedEmail()) {
+            $user->markEmailAsVerified();
+            event(new Verified($user));
+            Log::info('Email Verified Successfully', ['user_id' => $user->id]);
+        }
+
+        return response()->json(['message' => 'Email diverifikasi.', 'user' => $user]);
+    }
+
+    /**
+     * 🔑 FORGOT PASSWORD
+     */
+    public function forgotPassword(Request $request)
+    {
+        Log::info('Forgot Password Requested', ['email' => $request->email]);
+        $request->validate(['email' => 'required|email']);
+        $status = Password::sendResetLink($request->only('email'));
+
+        return $status === Password::RESET_LINK_SENT
+            ? response()->json(['message' => 'Link reset dikirim ke email.'])
+            : response()->json(['message' => 'Gagal mengirim link.'], 400);
     }
 }

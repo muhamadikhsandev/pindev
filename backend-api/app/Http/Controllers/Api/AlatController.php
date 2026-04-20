@@ -9,6 +9,9 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Storage; // Wajib import Storage
+use Illuminate\Support\Facades\Log;
+use App\Imports\AlatImport; // Pastikan diimport di atas
+use Maatwebsite\Excel\Facades\Excel;
 
 class AlatController extends Controller
 {
@@ -17,23 +20,113 @@ class AlatController extends Controller
         return response()->json(['data' => AlatUnit::getKondisiList()]);
     }
 
-    public function index()
-    {
-        $alats = Alat::with(['kategori', 'satuan'])
-            ->withCount(['units as stok' => function ($query) {
+public function index()
+{
+    // 🔥 HIT COUNTER
+    Log::info('🔥 API ALAT HIT - ' . now());
+
+    $startTotal = microtime(true);
+
+    // 🔥 DEBUG QUERY COUNT
+    DB::enableQueryLog();
+
+    // ================= QUERY =================
+    $startQuery = microtime(true);
+
+    $alats = Alat::query()
+        // 🔥 FIX 1: Tambahkan 'harga' (Sudah benar)
+        ->select('id', 'kategori_id', 'satuan_id', 'nama_alat', 'foto_path', 'harga')
+        ->with(['kategori:id,nama_kategori', 'satuan:id,nama_satuan'])
+        ->withCount([
+            'units as stok' => function ($query) {
                 $query->where('status', AlatUnit::STATUS_TERSEDIA)
-                      ->whereIn('kondisi', [AlatUnit::KONDISI_BAIK, AlatUnit::KONDISI_RUSAK_RINGAN]); 
-            }])
-            ->get();
+                      ->whereIn('kondisi', [
+                          AlatUnit::KONDISI_BAIK,
+                          AlatUnit::KONDISI_RUSAK_RINGAN
+                      ]);
+            }
+        ])
+        // ->limit(20) // ❌ HAPUS ATAU KOMENTAR BARIS INI BIAR DATA KELUAR SEMUA
+        ->get();
 
-        $alats->map(function ($alat) {
-            $alat->kondisi = $alat->stok > 0 ? AlatUnit::KONDISI_BAIK : AlatUnit::KONDISI_HILANG;
-            return $alat;
-        });
+    $endQuery = microtime(true);
 
-        return response()->json(['data' => $alats]);
+    // ================= LOOP =================
+    $startLoop = microtime(true);
+
+    foreach ($alats as $alat) {
+        // Kita tetep kirim kondisi buat jaga-jaga frontend butuh logika warna stok
+        $alat->kondisi = $alat->stok > 0
+            ? AlatUnit::KONDISI_BAIK
+            : AlatUnit::KONDISI_HILANG;
     }
 
+    $endLoop = microtime(true);
+
+    // ================= TOTAL =================
+    $endTotal = microtime(true);
+
+    // 🔥 LOGGING (Biar lu bisa pantau performa kalau data udah ribuan)
+    Log::info('⏱️ TOTAL TIME: ' . round(($endTotal - $startTotal), 4) . 's | Data Count: ' . $alats->count());
+
+    return response()->json(['data' => $alats]);
+}
+
+public function import(Request $request)
+{
+    // Validasi ekstensi file dan ukuran maksimal (5MB)
+    $request->validate([
+        'file' => 'required|mimes:xlsx,xls,csv|max:5120',
+    ]);
+
+    try {
+        $file = $request->file('file');
+
+        // 1. Eksekusi proses import data
+        Excel::import(new AlatImport, $file);
+
+        // 2. Kalkulasi jumlah baris data yang berhasil diproses
+        // Membaca Sheet pertama [0] untuk menghitung total entri
+        $dataArray = Excel::toArray(new AlatImport, $file);
+        $totalEntries = isset($dataArray[0]) ? count($dataArray[0]) : 0;
+
+        return response()->json([
+            'status' => 'success',
+            'message' => "Proses import berhasil. Sebanyak {$totalEntries} data alat telah ditambahkan ke sistem."
+        ], 200);
+
+    } catch (\Maatwebsite\Excel\Validators\ValidationException $e) {
+        $failures = $e->failures();
+        $detailedErrors = [];
+
+        foreach ($failures as $failure) {
+            foreach ($failure->errors() as $error) {
+                // Menyusun pesan error per baris untuk mempermudah debugging user
+                $detailedErrors[] = "Baris " . $failure->row() . ": " . $error;
+            }
+        }
+
+        return response()->json([
+            'status' => 'error',
+            'message' => $detailedErrors[0] ?? 'Terjadi kesalahan validasi pada data Excel Anda.',
+            'errors' => $failures
+        ], 422);
+
+    } catch (\Exception $e) {
+        $errorMessage = $e->getMessage();
+
+        // Penanganan khusus untuk kendala duplikasi data pada tingkat database
+        if (str_contains($errorMessage, 'Duplicate entry')) {
+            $errorMessage = "Terdapat data duplikat pada file Anda atau pada database sistem.";
+        }
+
+        return response()->json([
+            'status' => 'error',
+            'message' => "Gagal memproses import data: " . $errorMessage,
+            'details' => $errorMessage
+        ], 500);
+    }
+}
     public function store(Request $request)
     {
         $request->validate([

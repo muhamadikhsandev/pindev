@@ -2,54 +2,37 @@
 
 namespace App\Providers;
 
-use Illuminate\Support\ServiceProvider;
-use Illuminate\Auth\Notifications\VerifyEmail;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\URL;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\ServiceProvider;
+use Illuminate\Auth\Notifications\VerifyEmail;
 
 class AppServiceProvider extends ServiceProvider
 {
-    /**
-     * Register any application services.
-     */
-    public function register(): void
-    {
-        //
-    }
-
-    /**
-     * Bootstrap any application services.
-     */
     public function boot(): void
     {
-        /**
-         * Kustomisasi URL Verifikasi Email
-         * Memastikan ID dan HASH masuk ke query string agar bisa dibaca Next.js
-         */
         VerifyEmail::createUrlUsing(function ($notifiable) {
-            // 1. Domain frontend Next.js kamu
-            $frontendUrl = 'http://localhost:3000/verify-email';
+            $id = $notifiable->getKey();
+            $hash = sha1($notifiable->getEmailForVerification());
 
-            // 2. Buat signed URL sementara dari Laravel
-            // Kita tetap butuh ini untuk mendapatkan 'signature' dan 'expires' yang valid
-            $verifyUrl = URL::temporarySignedRoute(
-                'verification.verify',
+            // 1. Generate URL internal Laravel (berisi expires & signature)
+            $temporarySignedUrl = URL::temporarySignedRoute(
+                'api.verification.verify', // Harus match dengan name di Route
                 Carbon::now()->addMinutes(60),
-                [
-                    'id' => $notifiable->getKey(),
-                    'hash' => sha1($notifiable->getEmailForVerification()),
-                ]
+                ['id' => $id, 'hash' => $hash]
             );
 
-            // 3. Ambil signature dan expires dari hasil generate tadi
-            $queryString = parse_url($verifyUrl, PHP_URL_QUERY);
+            // 2. Ambil query string (expires & signature)
+            $queryString = parse_url($temporarySignedUrl, PHP_URL_QUERY);
 
-            // 4. SUSUN ULANG URL-NYA
-            // Kita paksa id dan hash masuk ke query string (?id=...&hash=...)
-            // Supaya Next.js bisa baca pakai searchParams.get('id')
-            return $frontendUrl . '?id=' . $notifiable->getKey() . 
-                                  '&hash=' . sha1($notifiable->getEmailForVerification()) . 
-                                  '&' . $queryString;
+            // 3. Gabungkan ke URL Next.js. Kita pindahkan id & hash ke Query String
+            $finalUrl = "http://localhost:3000/verify-email?id={$id}&hash={$hash}&{$queryString}";
+
+            Log::info('--- EMAIL VERIFICATION LINK GENERATED ---');
+            Log::info('Target Next.js: ' . $finalUrl);
+
+            return $finalUrl;
         });
     }
 }

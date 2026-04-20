@@ -2,9 +2,9 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
 
-class AlatUnit extends Model
+
+class AlatUnit extends BaseModel
 {
     protected $table = 'alat_units';
 

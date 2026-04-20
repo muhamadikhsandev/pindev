@@ -3,7 +3,8 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Factories\HasFactory; // 1. Tambahkan ini
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+
 class Pengembalian extends Model
 {
     use HasFactory;
@@ -12,7 +13,7 @@ class Pengembalian extends Model
     protected $fillable = ['peminjaman_id', 'tanggal_kembali', 'kondisi_kembali', 'catatan'];
 
     // Konstanta ENUM agar mudah diingat dan dipanggil di Controller
-    public const KONDISI_BELUM_DICEK = 'Belum Dicek';
+    // KONDISI_BELUM_DICEK sudah dihapus, status pengecekan diwakili oleh tabel Peminjaman
     public const KONDISI_BAIK = 'Baik';
     public const KONDISI_BERMASALAH = 'Bermasalah';
 

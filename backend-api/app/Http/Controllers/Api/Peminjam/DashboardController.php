@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Http\Controllers\Api;
+namespace App\Http\Controllers\Api\Peminjam;
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
@@ -25,36 +25,29 @@ class DashboardController extends Controller
             $userId = $user->id;
 
             // --- 1. STATS CARDS ---
-            
-            // Hitung yang sedang dipinjam
             $sedangDipinjam = Peminjaman::where('user_id', $userId)
                 ->where('status', 'Dipinjam') 
                 ->count();
 
-            // Hitung Menunggu (Petugas + Admin)
-            // Sesuai request: "Menunggu" diganti "Menunggu Petugas" atau "Menunggu Admin"
             $menungguValidasi = Peminjaman::where('user_id', $userId)
                 ->whereIn('status', ['Menunggu Petugas', 'Menunggu Admin'])
                 ->count();
 
-            // Total Denda
             $totalDenda = Denda::whereHas('pengembalian.peminjaman', function ($q) use ($userId) {
                 $q->where('user_id', $userId);
             })->sum('jumlah_denda');
 
-            // --- 2. WARNINGS / STATUS TERDEKAT (LOGIKA BARU) ---
-            // Kita cari peminjaman aktif ('Dipinjam') atau yang sudah lewat tapi belum balik ('Terlambat' jika ada status itu)
+            // --- 2. WARNINGS / STATUS TERDEKAT ---
             $activeLoans = Peminjaman::with('detail_peminjaman.alat')
                 ->where('user_id', $userId)
-                ->where('status', 'Dipinjam') // Hanya cek yang sedang dipinjam
-                ->orderBy('tanggal_rencana_kembali', 'asc') // Urutkan dari yang paling cepat harus kembali
+                ->where('status', 'Dipinjam') 
+                ->orderBy('tanggal_rencana_kembali', 'asc') 
                 ->get();
 
             $warnings = [];
             $today = Carbon::now()->startOfDay();
 
             foreach ($activeLoans as $loan) {
-                // Ambil nama alat pertama untuk display
                 $alatPertama = $loan->detail_peminjaman->first()?->alat;
                 $namaAlat = $alatPertama ? $alatPertama->nama_alat : 'Peminjaman #' . $loan->id;
                 
@@ -62,30 +55,20 @@ class DashboardController extends Controller
                     $namaAlat .= " (+" . ($loan->detail_peminjaman->count() - 1) . " alat)";
                 }
 
-                // Gunakan tanggal_rencana_kembali sebagai deadline
                 $deadline = Carbon::parse($loan->tanggal_rencana_kembali)->startOfDay();
-                
-                // Hitung selisih hari: 
-                // Negatif = Lewat deadline (Terlambat)
-                // 0 = Hari ini
-                // Positif = Masih ada waktu
                 $diff = $today->diffInDays($deadline, false); 
 
-                // Logika Pesan Warning
                 if ($diff < 0) {
-                    // SUDAH LEWAT (Terlambat)
                     $warnings[] = [
                         'message' => "{$namaAlat} terlambat " . abs($diff) . " hari (Wajib Kembali: " . $deadline->format('d M') . ")",
                         'type' => 'danger'
                     ];
                 } elseif ($diff == 0) {
-                    // HARI INI
                     $warnings[] = [
                         'message' => "{$namaAlat} harus dikembalikan HARI INI.",
                         'type' => 'warning'
                     ];
                 } elseif ($diff <= 3) {
-                    // KURANG DARI 3 HARI
                     $warnings[] = [
                         'message' => "{$namaAlat} dikembalikan {$diff} hari lagi (" . $deadline->format('d M') . ").",
                         'type' => 'warning'
@@ -96,14 +79,13 @@ class DashboardController extends Controller
             // --- 3. CHART DATA (7 Hari Terakhir) ---
             $chartCategories = [];
             $dataPeminjaman = [];
-            $dataPengembalian = []; // Opsional jika ingin ditampilkan
 
             Carbon::setLocale('id');
 
             for ($i = 6; $i >= 0; $i--) {
                 $date = Carbon::now()->subDays($i);
                 $formattedDate = $date->format('Y-m-d');
-                $chartCategories[] = $date->translatedFormat('D'); // Sen, Sel...
+                $chartCategories[] = $date->translatedFormat('D'); 
 
                 $dataPeminjaman[] = Peminjaman::where('user_id', $userId)
                     ->whereDate('tanggal_pinjam', $formattedDate)
@@ -153,7 +135,6 @@ class DashboardController extends Controller
                         'name' => $namaAlat,
                         'code' => (string) $kodeAlat,
                         'date' => Carbon::parse($peminjaman->tanggal_pinjam)->translatedFormat('d M Y'),
-                        // Tambahkan Deadline agar Frontend bisa menampilkan tanggal kembali
                         'deadline' => Carbon::parse($peminjaman->tanggal_rencana_kembali)->translatedFormat('d M Y'), 
                         'status' => $peminjaman->status,
                     ];
@@ -173,7 +154,7 @@ class DashboardController extends Controller
                 ],
                 'categories' => $categoriesFormatted,
                 'recent_activities' => $recentActivities,
-                'warnings' => $warnings // Array warning dinamis dari backend
+                'warnings' => $warnings 
             ]);
 
         } catch (\Exception $e) {

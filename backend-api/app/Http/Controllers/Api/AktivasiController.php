@@ -7,102 +7,143 @@ use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Hash;
 
 class AktivasiController extends Controller
 {
-    public function cekNis(Request $request)
+    /**
+     * Step 1: Cek apakah NIS/NIP ada di database master
+     */
+    public function cekIdentitas(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'nis' => 'required|string',
+            'nomor_identitas' => 'required|string',
+        ], [
+            'nomor_identitas.required' => 'Nomor identitas (NIS/NIP) wajib diisi.'
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['success' => false, 'message' => 'NIS wajib diisi'], 422);
+            return response()->json([
+                'success' => false, 
+                'message' => $validator->errors()->first()
+            ], 422);
         }
 
-        $user = User::where('nis', $request->nis)->first();
+        // Cari user berdasarkan nomor_identitas
+        $user = User::where('nomor_identitas', $request->nomor_identitas)->first();
 
         if (!$user) {
-            return response()->json(['success' => false, 'message' => 'NIS tidak terdaftar dalam sistem.'], 404);
+            return response()->json([
+                'success' => false, 
+                'message' => 'Nomor identitas tidak ditemukan dalam database master.'
+            ], 404);
         }
 
+        // --- CEK JIKA SUDAH AKTIF ---
         if ($user->status === 'aktif') {
-            return response()->json(['success' => false, 'message' => 'Akun ini sudah aktif.'], 400);
+            return response()->json([
+                'success' => false,
+                'is_already_active' => true,
+                'message' => "Halo {$user->name}, akun kamu sudah aktif. Silakan langsung login.",
+                'data' => [
+                    'name' => $user->name
+                ]
+            ], 400);
         }
 
         return response()->json([
             'success' => true,
-            'message' => 'NIS ditemukan.',
+            'message' => "Data ditemukan: {$user->name}",
             'data' => [
                 'name' => $user->name,
-                'nis'  => $user->nis
+                'nomor_identitas' => $user->nomor_identitas,
+                'status_peminjam' => $user->status_peminjam // GURU atau SISWA
             ]
         ], 200);
     }
 
-
-    public function simpanPassword(Request $request)
-{
-    $validator = Validator::make($request->all(), [
-        'id' => 'required|exists:users,id',
-        'password' => 'required|string|min:8|confirmed',
-    ]);
-
-    if ($validator->fails()) {
-        return response()->json(['success' => false, 'errors' => $validator->errors()], 422);
-    }
-
-    $user = User::findOrFail($request->id);
-    
-    $user->update([
-        'password' => bcrypt($request->password), // Laravel otomatis nge-hash tapi lebih aman pake ini
-        'status' => 'aktif', // Aktifkan akun di sini
-    ]);
-
-    return response()->json([
-        'success' => true,
-        'message' => 'Password berhasil disimpan, akun Anda kini aktif!'
-    ]);
-}
-
+    /**
+     * Step 2: Kirim Link Aktivasi ke Email
+     */
     public function aktivasi(Request $request)
     {
-        Log::info('Mencoba mengirim email aktivasi ke: ' . $request->email);
-
         $validator = Validator::make($request->all(), [
-            'nis'   => 'required|exists:users,nis',
+            'nomor_identitas' => 'required|exists:users,nomor_identitas',
             'email' => 'required|email|unique:users,email',
+        ], [
+            'email.unique' => 'Email ini sudah digunakan oleh akun lain.',
+            'email.email' => 'Format email tidak valid.',
+            'nomor_identitas.exists' => 'Data identitas tidak valid.'
         ]);
 
         if ($validator->fails()) {
             return response()->json([
                 'success' => false,
-                'message' => 'Email salah atau sudah terdaftar.',
+                'message' => $validator->errors()->first(),
                 'errors'  => $validator->errors()
             ], 422);
         }
 
         try {
-            $user = User::where('nis', $request->nis)->first();
+            $user = User::where('nomor_identitas', $request->nomor_identitas)->first();
             
-            // Simpan email baru
+            // Update email yang akan digunakan untuk login/verifikasi
             $user->update(['email' => $request->email]);
 
-            // KIRIM EMAIL VERIFIKASI (WAJIB JALAN)
+            // Kirim email verifikasi
             $user->sendEmailVerificationNotification();
-
-            Log::info('Email berhasil dikirim via Mailtrap untuk NIS: ' . $request->nis);
 
             return response()->json([
                 'success' => true,
-                'message' => 'Link aktivasi telah dikirim ke ' . $request->email,
+                'message' => 'Link aktivasi telah dikirim ke ' . $request->email . '. Silakan cek kotak masuk atau spam.',
             ], 200);
 
         } catch (\Exception $e) {
             Log::error('Gagal kirim email: ' . $e->getMessage());
             return response()->json([
                 'success' => false,
-                'message' => 'Gagal mengirim email: ' . $e->getMessage()
+                'message' => 'Server gagal mengirim email. Cek konfigurasi mail server.'
+            ], 500);
+        }
+    }
+
+    /**
+     * Step 3: Simpan Password Baru setelah Verifikasi Email
+     */
+    public function simpanPassword(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'id' => 'required|exists:users,id',
+            'password' => 'required|string|min:8|confirmed',
+        ], [
+            'password.confirmed' => 'Konfirmasi password tidak cocok.',
+            'password.min' => 'Password minimal 8 karakter.'
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false, 
+                'message' => $validator->errors()->first(),
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        try {
+            $user = User::findOrFail($request->id);
+            
+            $user->update([
+                'password' => Hash::make($request->password),
+                'status' => 'aktif', // Set status jadi aktif setelah password dibuat
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Password berhasil disimpan! Akun Anda kini aktif, silakan login.'
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal menyimpan password.'
             ], 500);
         }
     }

@@ -4,11 +4,12 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use App\Traits\Loggable; // 1. Import Trait-nya di sini
 
 class Peminjaman extends Model
 {
 
-    use HasFactory;
+    use HasFactory,Loggable;
 
     protected $table = 'peminjaman';
 
@@ -18,7 +19,6 @@ class Peminjaman extends Model
     const STATUS_DISETUJUI = 'Disetujui';
     const STATUS_DIPINJAM = 'Dipinjam';
     const STATUS_MENUNGGU_PENGECEKAN = 'Menunggu Pengecekan';
-    const STATUS_BERMASALAH = 'Bermasalah';
     const STATUS_DIKEMBALIKAN = 'Dikembalikan';
     const STATUS_DITOLAK = 'Ditolak';
 
@@ -45,7 +45,6 @@ class Peminjaman extends Model
             self::STATUS_DISETUJUI,
             self::STATUS_DIPINJAM,
             self::STATUS_MENUNGGU_PENGECEKAN,
-            self::STATUS_BERMASALAH,
             self::STATUS_DIKEMBALIKAN,
             self::STATUS_DITOLAK,
         ];
@@ -56,6 +55,8 @@ class Peminjaman extends Model
      */
     protected static function booted()
     {
+
+    parent::booted();
         static::creating(function ($peminjaman) {
             if (empty($peminjaman->kode_peminjaman)) {
                 $today = date('Ymd');

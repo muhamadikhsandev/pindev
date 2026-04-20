@@ -3,62 +3,78 @@
 namespace App\Imports;
 
 use App\Models\Alat;
+use App\Models\AlatUnit;
 use App\Models\KategoriAlat;
 use App\Models\SatuanAlat;
-use Maatwebsite\Excel\Concerns\ToModel;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Str;
+use Illuminate\Support\Facades\DB;
+use Maatwebsite\Excel\Concerns\ToCollection;
 use Maatwebsite\Excel\Concerns\WithHeadingRow;
 use Maatwebsite\Excel\Concerns\WithValidation;
 
-class AlatImport implements ToModel, WithHeadingRow, WithValidation
+class AlatImport implements ToCollection, WithHeadingRow, WithValidation
 {
-    public function model(array $row)
+    public function collection(Collection $rows)
     {
-        // 1. Logika 'First or Create' untuk Kategori
-        $kategori = KategoriAlat::firstOrCreate(
-            ['nama_kategori' => trim($row['kategori'])]
-        );
+        $kategoriMap = KategoriAlat::pluck('id', 'nama_kategori')->toArray();
+        $satuanMap = SatuanAlat::pluck('id', 'nama_satuan')->toArray();
 
-        // 2. Logika 'First or Create' untuk Satuan
-        $satuan = SatuanAlat::firstOrCreate(
-            ['nama_satuan' => trim($row['satuan'])]
-        );
+        DB::transaction(function () use ($rows, $kategoriMap, $satuanMap) {
+            foreach ($rows as $row) {
+                $kategoriName = trim($row['kategori']);
+                $satuanName = trim($row['satuan']);
 
-        // --- LOGIKA TRANSFORMASI KONDISI (Flexibility) ---
-        // Kita ubah input admin (misal: "rusak ringan") jadi ("RUSAK_RINGAN")
-        $kondisiRaw = strtoupper(trim($row['kondisi'] ?? 'BAIK'));
-        $kondisiFix = str_replace(' ', '_', $kondisiRaw);
+                $kategoriId = $kategoriMap[$kategoriName] ?? null;
+                $satuanId = $satuanMap[$satuanName] ?? null;
 
-        // Daftar kondisi yang diizinkan (sesuai Model & ENUM)
-        $allowedKondisi = [
-            Alat::KONDISI_BAIK, 
-            Alat::KONDISI_RUSAK_RINGAN, 
-            Alat::KONDISI_RUSAK_BERAT, 
-            Alat::KONDISI_HILANG, 
-            Alat::KONDISI_PERBAIKAN
-        ];
+                if (!$kategoriId || !$satuanId) {
+                    continue; 
+                }
 
-        // Cek validitas, kalau admin ngetik aneh-aneh balikin ke default 'BAIK'
-        $kondisiFinal = in_array($kondisiFix, $allowedKondisi) ? $kondisiFix : Alat::KONDISI_BAIK;
+                $alat = Alat::create([
+                    'nama_alat'   => trim($row['nama_alat']),
+                    'kategori_id' => $kategoriId,
+                    'satuan_id'   => $satuanId,
+                    'harga'       => $row['harga'] ?? 0,
+                    'foto_path'   => null, 
+                ]);
 
-        // 3. Simpan data Alat
-        return new Alat([
-            'kategori_id' => $kategori->id,
-            'satuan_id'   => $satuan->id,
-            'nama_alat'   => $row['nama_alat'],
-            'stok'        => $row['stok'] ?? 0,
-            'kondisi'     => $kondisiFinal,
-            'harga'       => $row['harga'] ?? 0,
-            'foto_path'   => null,
-        ]);
+                $cleanName = preg_replace('/[^A-Za-z0-9]/', '', $alat->nama_alat);
+                $prefix = strtoupper(Str::limit($cleanName, 4, ''));
+                if (strlen($prefix) < 4) {
+                    $prefix = str_pad($prefix, 4, 'X'); 
+                }
+
+                $stokAwal = (int) $row['stok_awal'];
+                $unitsData = [];
+                for ($i = 1; $i <= $stokAwal; $i++) {
+                    $kodeUnit = $prefix . '-' . str_pad($i, 3, '0', STR_PAD_LEFT);
+                    $uniqueCode = $kodeUnit . '-' . $alat->id; 
+
+                    $unitsData[] = [
+                        'alat_id'    => $alat->id,
+                        'kode_unit'  => $uniqueCode,
+                        'kondisi'    => AlatUnit::KONDISI_BAIK,
+                        'status'     => AlatUnit::STATUS_TERSEDIA,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ];
+                }
+
+                AlatUnit::insert($unitsData);
+            }
+        });
     }
 
     public function rules(): array
     {
         return [
-            'nama_alat' => 'required|string|max:255|unique:alat,nama_alat', 
-            'kategori'  => 'required|string',
-            'satuan'    => 'required|string',
-            'stok'      => 'required|numeric',
+            // 🔥 FIX: Ganti 'alats' menjadi 'alat' agar sesuai database kamu
+            'nama_alat' => 'required|string|max:255|unique:alat,nama_alat',
+            'kategori'  => 'required|exists:kategori_alat,nama_kategori',
+            'satuan'    => 'required|exists:satuan_alat,nama_satuan',
+            'stok_awal' => 'required|integer|min:1|max:200',
             'harga'     => 'nullable|numeric',
         ];
     }
@@ -66,7 +82,12 @@ class AlatImport implements ToModel, WithHeadingRow, WithValidation
     public function customValidationMessages()
     {
         return [
-            'nama_alat.unique' => '":input"',
+            'nama_alat.unique' => 'Gagal! Alat ":input" sudah ada di database. Hapus data lama atau ganti nama jika ini barang berbeda.',
+            'nama_alat.required' => 'Nama alat tidak boleh kosong.',
+            'kategori.exists'  => 'Nama Kategori ":input" tidak terdaftar di sistem.',
+            'satuan.exists'    => 'Nama Satuan ":input" tidak terdaftar di sistem.',
+            'stok_awal.max'    => 'Stok awal maksimal 200 unit per item demi performa.',
+            'stok_awal.min'    => 'Stok awal minimal 1 unit.',
         ];
     }
 }

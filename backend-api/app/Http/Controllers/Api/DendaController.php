@@ -19,9 +19,6 @@ class DendaController extends Controller
 {
     use BulkActionTrait;
 
-    /**
-     * Inisialisasi model untuk BulkActionTrait
-     */
     protected $model;
 
     public function __construct(Denda $denda)
@@ -30,8 +27,55 @@ class DendaController extends Controller
     }
 
     /**
+     * MENGAMBIL DATA DENDA KHUSUS USER YANG LOGIN (Untuk Peminjam)
+     */
+    public function dendaSaya(Request $request)
+    {
+        try {
+            $user = $request->user();
+            
+            // Cari denda yang pengembalian -> peminjamannya milik user yang login
+            $data = Denda::with(['pengembalian.peminjaman', 'kategori', 'alat'])
+                ->whereHas('pengembalian.peminjaman', function ($q) use ($user) {
+                    $q->where('user_id', $user->id);
+                })
+                ->latest()
+                ->get();
+
+            return response()->json([
+                'success' => true,
+                'data'    => $data
+            ], 200);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal mengambil data denda',
+                'error'   => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * UPDATE STATUS LUNAS (Dipanggil setelah bayar QRIS/Manual)
+     */
+    public function updateStatus(Request $request, $id)
+    {
+        try {
+            $denda = Denda::findOrFail($id);
+            $denda->update(['status' => Denda::STATUS_LUNAS]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Status denda berhasil diupdate menjadi Lunas',
+                'data' => $denda
+            ], 200);
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => 'Gagal update status'], 500);
+        }
+    }
+
+    /**
      * Export Laporan ke Excel atau PDF
-     * Mendukung pemanggilan via Axios Blob dari Frontend
      */
     public function export(Request $request)
     {
@@ -43,29 +87,21 @@ class DendaController extends Controller
                 return Excel::download(new DendaExport, 'Laporan_Denda_' . now()->format('Ymd_His') . '.xlsx');
             }
 
-            // Render PDF menggunakan view Blade
             $pdf = Pdf::loadView('exports.denda_pdf', ['denda' => $data]);
-            
-            // Mengatur kertas A4 Portrait
             $pdf->setPaper('a4', 'portrait');
 
             return $pdf->download('Laporan_Denda_' . now()->format('Ymd_His') . '.pdf');
         } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Gagal memproses export: ' . $e->getMessage()
-            ], 500);
+            return response()->json(['success' => false, 'message' => 'Gagal memproses export: ' . $e->getMessage()], 500);
         }
     }
 
     /**
-     * Mengambil data referensi untuk Form Denda
-     * FIX: Query Alat menggunakan relasi AlatUnit (Stok Virtual)
+     * Mengambil data referensi untuk Form Denda (Untuk Admin)
      */
     public function getOptions()
     {
         try {
-            // Referensi Pengembalian
             $pengembalian = Pengembalian::with('peminjaman.peminjam')
                 ->latest()
                 ->get()
@@ -78,10 +114,8 @@ class DendaController extends Controller
                     ];
                 });
 
-            // Master Kategori Denda
             $kategori = KategoriDenda::select('id', 'nama_kategori', 'metode_denda', 'nilai_denda')->get();
 
-            // Master Alat (Hanya yang memiliki unit yang TIDAK rusak berat)
             $alat = Alat::select('id', 'nama_alat', 'harga')
                 ->whereHas('units', function($query) {
                     $query->where('kondisi', '!=', AlatUnit::KONDISI_RUSAK_BERAT);
@@ -94,16 +128,10 @@ class DendaController extends Controller
                 'alat'         => $alat
             ], 200);
         } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Gagal mengambil opsi: ' . $e->getMessage()
-            ], 500);
+            return response()->json(['success' => false, 'message' => 'Gagal mengambil opsi: ' . $e->getMessage()], 500);
         }
     }
 
-    /**
-     * Menampilkan daftar denda
-     */
     public function index(Request $request)
     {
         try {
@@ -123,24 +151,12 @@ class DendaController extends Controller
                 $query->where('status', $request->status);
             }
 
-            $data = $query->latest()->get();
-
-            return response()->json([
-                'success' => true,
-                'data'    => $data
-            ], 200);
+            return response()->json(['success' => true, 'data' => $query->latest()->get()], 200);
         } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Gagal mengambil data',
-                'error'   => $e->getMessage()
-            ], 500);
+            return response()->json(['success' => false, 'message' => 'Gagal mengambil data', 'error' => $e->getMessage()], 500);
         }
     }
 
-    /**
-     * Simpan data denda baru
-     */
     public function store(Request $request)
     {
         $validator = Validator::make($request->all(), [
@@ -148,34 +164,24 @@ class DendaController extends Controller
             'kategori_denda_id' => 'required|exists:kategori_denda,id',
             'alat_id'           => 'nullable|exists:alat,id',
             'jumlah_denda'      => 'required|numeric|min:0',
-            'status'            => 'required|in:belum_bayar,lunas',
+            'status'            => 'required|in:' . Denda::STATUS_BELUM_BAYAR . ',' . Denda::STATUS_LUNAS,
             'keterangan'        => 'nullable|string'
         ]);
 
-        if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
-        }
+        if ($validator->fails()) return response()->json(['errors' => $validator->errors()], 422);
 
         try {
             $denda = Denda::create($request->all());
-            
             return response()->json([
                 'success' => true,
                 'message' => 'Data denda berhasil ditambahkan',
                 'data'    => $denda->load(['pengembalian.peminjaman.peminjam', 'kategori', 'alat'])
             ], 201);
         } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Gagal menyimpan denda',
-                'error'   => $e->getMessage()
-            ], 500);
+            return response()->json(['success' => false, 'message' => 'Gagal menyimpan denda'], 500);
         }
     }
 
-    /**
-     * Tampilkan detail denda
-     */
     public function show($id)
     {
         try {
@@ -186,9 +192,6 @@ class DendaController extends Controller
         }
     }
 
-    /**
-     * Update data denda
-     */
     public function update(Request $request, $id)
     {
         $validator = Validator::make($request->all(), [
@@ -196,13 +199,11 @@ class DendaController extends Controller
             'kategori_denda_id' => 'required|exists:kategori_denda,id',
             'alat_id'           => 'nullable|exists:alat,id',
             'jumlah_denda'      => 'required|numeric|min:0',
-            'status'            => 'required|in:belum_bayar,lunas',
+            'status'            => 'required|in:' . Denda::STATUS_BELUM_BAYAR . ',' . Denda::STATUS_LUNAS,
             'keterangan'        => 'nullable|string'
         ]);
 
-        if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
-        }
+        if ($validator->fails()) return response()->json(['errors' => $validator->errors()], 422);
 
         try {
             $denda = Denda::findOrFail($id);
@@ -214,33 +215,18 @@ class DendaController extends Controller
                 'data'    => $denda->load(['pengembalian.peminjaman.peminjam', 'kategori', 'alat'])
             ], 200);
         } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Gagal memperbarui denda',
-                'error'   => $e->getMessage()
-            ], 500);
+            return response()->json(['success' => false, 'message' => 'Gagal memperbarui denda'], 500);
         }
     }
 
-    /**
-     * Hapus data denda
-     */
     public function destroy($id)
     {
         try {
             $denda = Denda::findOrFail($id);
             $denda->delete();
-
-            return response()->json([
-                'success' => true,
-                'message' => 'Data denda berhasil dihapus'
-            ], 200);
+            return response()->json(['success' => true, 'message' => 'Data denda berhasil dihapus'], 200);
         } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Gagal menghapus data',
-                'error'   => $e->getMessage()
-            ], 500);
+            return response()->json(['success' => false, 'message' => 'Gagal menghapus data'], 500);
         }
     }
 }
